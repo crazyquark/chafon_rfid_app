@@ -150,11 +150,11 @@ class rfid_app(serial.Serial):
     def write_token_raw(self, data, lock=False):
         lock = "\x01" if lock else "\x00"
         self._execute_waitresult(
-            "\x03\x0C", lock + data, check_result=ERR_NONE)
+            "\x02\x0C", lock + data, check_result=ERR_NONE)
         if self.read_token_raw() == data:
             return
         self._execute_waitresult(
-            "\x02\x0C", lock + data, check_result=ERR_NONE)
+            "\x03\x0C", lock + data, check_result=ERR_NONE)
         if self.read_token_raw() == data:
             return
         raise IOError("rfid write failed")
