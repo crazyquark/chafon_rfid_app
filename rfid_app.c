@@ -15,6 +15,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <fcntl.h>
 #include <termios.h>
 #include <getopt.h>
+#include <time.h>
 
 #define TTYDEV "/dev/ttyUSB0"
 #define BAUDRATE B38400
@@ -39,6 +40,7 @@ void print_usage() {
     printf("\t -d tty device to connect to (/dev/ttyUSB0 default)\n");
     printf("\t -w [10 char hex string] write data to tag/fob\n");
     printf("\t -b don't beep while accessing tag/fob, might affect some tags (T55xx/EM4305) tags\n");
+	printf("\t -a randomly generate EM4100 aptus compatible tags 0-999999999\n");
 }
 
 int open_device(char* tty_device) {
@@ -104,7 +106,7 @@ int send_beep(int tty_fd_l) {
     cnt = read(tty_fd_l,&c,100);
 }
 
-int send_read(int tty_fd_l, int beep, int format) {
+int send_read(int tty_fd_l, int beep, int format, char* output) {
     unsigned char read_cmd[] = {0xAA,0xDD,0x00,0x03,0x01,0x0C,0x0D};
     unsigned char c[100] = {0};
     unsigned char res_arr[100] = {0};
@@ -125,15 +127,9 @@ int send_read(int tty_fd_l, int beep, int format) {
     }
 
 
-    // Calculate checksum (xor over byte 5 to end-1)
-
-    for (i=4 ; i<cnt-1 ; i++) {
-        csum^=c[i];
-    }
-
     // Remove 0xAA,0x00 patterns
     idx = 7;
-    for (i=7 ; i<cnt-1 ; i++) {
+    for (i=7 ; i<cnt ; i++) {
         c[i] = res_arr[idx];
         if ((res_arr[idx]==0xAA) && (res_arr[idx+1]==0x00)) {
             idx++;
@@ -141,8 +137,22 @@ int send_read(int tty_fd_l, int beep, int format) {
         idx++;
     }
 
-    if (csum != c[cnt-1])
-        printf("Read checksum missmatch!: %X vs %X\n", csum, c[cnt]);
+    // Calculate checksum (xor over byte 5 to end-1)
+    for (i=4 ; i<cnt-1 ; i++) {
+        csum^=res_arr[i];
+    }
+
+    if (csum != res_arr[cnt-1])
+        printf("Read checksum missmatch!: %X vs %X\n", csum, res_arr[cnt-1]);
+
+    if (output) {
+        int j = 0;
+        for (i=7 ; i<12 ; i++) {
+            sprintf(&output[j],"%02x",c[i]);
+            j=j+2;
+        }
+        return 0;
+    }
 
     switch (format) {
         case 0:     // HEX (no spaces)
@@ -200,7 +210,7 @@ int send_read(int tty_fd_l, int beep, int format) {
     return 0;
 }
 
-int send_write(int tty_fd_l, int beep, char* write_string) {
+int send_write(int tty_fd_l, int beep, char* write_string, int skip_final_read) {
     unsigned char read_cmd[] = {0xAA,0xDD,0x00,0x03,0x01,0x0C,0x0D};
 //    unsigned char write_cmd[] = {0xAA,0xDD,0x00,0x09, 0x02,0x0C,0x00, 0x01,0x04,0x6E,0x87,0xA9, 0x4B};
     unsigned char cmd_array[100] = {0};
@@ -340,8 +350,36 @@ int send_write(int tty_fd_l, int beep, char* write_string) {
     }
 */
 
-    send_read(tty_fd_l, 0, 0);
+    if (!skip_final_read)
+        send_read(tty_fd_l, 0, 0, NULL);
 }
+
+#define APTUS_MAX 999999999
+int gen_aptus_tags(int tty_fd_l) {
+	int rand_a = 0;
+    char em_num[20] = {0};
+	char readout[20] = {0};
+
+	srand(time(NULL));
+    while (1) {
+        rand_a = ( rand() % APTUS_MAX ) + 1;
+        if (rand_a > 100000000) {
+            //generate bitstream
+            sprintf(em_num, "01%08x", rand_a);
+            //printf("%d %s\n",rand_a, em_num);
+
+            memset(readout, 0, 20);
+            while (strcmp(em_num, readout)) {
+                send_write(tty_fd_l, 0, em_num, 1);
+                send_read(tty_fd_l, 0, 0, readout);
+            }
+            printf("%d %s %s\n",rand_a, em_num, readout);
+			send_beep(tty_fd_l);
+        }
+    }
+	return 0;
+}
+
 
 int main(int argc,char** argv)
 {
@@ -353,9 +391,10 @@ int main(int argc,char** argv)
     int beep = 1;
     int read_device = 0;
     int format = 0;
+    int aptus_generate = 0;
     char* write_string = NULL;
 
-    while ((option = getopt(argc, argv,"d:rlbf:w:")) != -1) {
+    while ((option = getopt(argc, argv,"d:rlbf:w:a")) != -1) {
         switch (option) {
             case 'd' : tty_device = optarg; 
                 break;
@@ -368,6 +407,8 @@ int main(int argc,char** argv)
             case 'f' : format = atoi(optarg);
                 break;
             case 'w' : write_string = optarg;
+                break;
+            case 'a' : aptus_generate = 1;
                 break;
             default: print_usage(); 
                  exit(EXIT_FAILURE);
@@ -384,13 +425,16 @@ int main(int argc,char** argv)
         get_id(tty_fd);
 
     if (write_string) {
-        send_write(tty_fd, beep, write_string);
+        send_write(tty_fd, beep, write_string, 0);
         close(tty_fd);
         exit(EXIT_SUCCESS);
     }
 
     if (read_device)
-        send_read(tty_fd, beep, format);
+        send_read(tty_fd, beep, format, NULL);
+
+	if (aptus_generate)
+        gen_aptus_tags(tty_fd);
 
 exit:
     close(tty_fd);
